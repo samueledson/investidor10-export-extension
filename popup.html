@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Investidor10 Export</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="header">
+        <div>
+          <h1>Investidor10 Export</h1>
+          <p id="status">Verificando página...</p>
+        </div>
+      </header>
+
+      <section class="summary" aria-live="polite">
+        <div>
+          <span class="label">Tipos de ativo</span>
+          <strong id="section-count">-</strong>
+        </div>
+        <div>
+          <span class="label">Posições</span>
+          <strong id="row-count">-</strong>
+        </div>
+      </section>
+
+      <section id="warnings" class="warnings" hidden></section>
+
+      <section class="actions">
+        <button id="expand-button" class="secondary" type="button" disabled>Expandir tudo</button>
+        <button id="csv-button" type="button" disabled>Exportar CSV</button>
+        <button id="pdf-button" type="button" disabled>Exportar PDF</button>
+      </section>
+
+      <p class="privacy">Processamento local. Nenhum dado é enviado para servidores.</p>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
