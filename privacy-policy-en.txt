@@ -1,0 +1,25 @@
+Privacy policy — Investidor10 Export (Chrome extension)
+
+Last updated: 2026-07-08
+
+This extension does not collect, store, or transmit personal information to the developer or third parties.
+
+What the extension does
+- When you use the popup, the extension reads the investment positions already displayed on the Investidor10 wallet positions page.
+- It can expand the visible asset type tables and export the rendered position data as CSV or PDF files.
+- CSV and PDF generation happens locally in your browser.
+
+Data and permissions
+- The extension may read the current tab's URL only to confirm that you are on a supported Investidor10 wallet positions page.
+- The extension reads table text rendered on the page, such as asset names, quantities, prices, balances, percentages, and other visible columns, only to generate the export files requested by you.
+- The extension does not log, upload, sell, or share your wallet data.
+- The extension does not use external servers, analytics SDKs, or remote processing.
+
+Third parties
+- The extension runs locally in Chrome and does not send data to the developer or third parties.
+- The Investidor10 website itself is operated by Investidor10 and is subject to its own privacy policy.
+
+Contact
+- Project repository: https://github.com/samueledson/investidor10-export-extension
+
+Host this document at a public HTTPS URL and enter that URL in the Chrome Web Store developer dashboard under Privacy practices.
