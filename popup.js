@@ -1,10 +1,23 @@
 const TARGET_URL = "https://investidor10.com.br/wallet/my-wallet/positions";
-const POSITIONS_PATH_PATTERN = /^\/wallet\/my-wallet(?:\/[^/]+)?\/positions\/?$/;
+const WALLET_HOST = "investidor10.com.br";
+const PAGE_PATTERNS = {
+  positions: /^\/wallet\/my-wallet(?:\/[^/]+)?\/positions\/?$/i,
+  transactions: /^\/wallet\/my-wallet\/[^/]+\/entries\/?$/i,
+  dividends: /^\/wallet\/my-wallet\/[^/]+\/earnings\/?$/i
+};
+const PAGE_LABELS = {
+  positions: "Posições",
+  transactions: "Lançamentos",
+  dividends: "Proventos"
+};
 
 const statusEl = document.getElementById("status");
 const sectionCountEl = document.getElementById("section-count");
 const rowCountEl = document.getElementById("row-count");
 const warningsEl = document.getElementById("warnings");
+const earningsFilterNoticeEl = document.getElementById("earnings-filter-notice");
+const pageKindEl = document.getElementById("page-kind");
+const walletLinksEl = document.getElementById("wallet-links");
 const expandButton = document.getElementById("expand-button");
 const csvButton = document.getElementById("csv-button");
 const pdfButton = document.getElementById("pdf-button");
@@ -16,8 +29,8 @@ let isBusy = false;
 
 document.addEventListener("DOMContentLoaded", initialize);
 expandButton.addEventListener("click", expandAllSections);
-csvButton.addEventListener("click", () => exportData("EXPORT_CSV"));
-pdfButton.addEventListener("click", () => exportData("EXPORT_PDF"));
+csvButton.addEventListener("click", () => exportData("EXPORT_CURRENT_CSV"));
+pdfButton.addEventListener("click", () => exportData("EXPORT_CURRENT_PDF"));
 
 async function initialize() {
   syncToolbarIconWithColorScheme();
@@ -26,25 +39,37 @@ async function initialize() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeTabId = tab?.id ?? null;
 
-  if (!tab?.url || !isAcceptedPositionsUrl(tab.url)) {
+  if (!tab?.url || !isAcceptedWalletUrl(tab.url)) {
     setBusy(false);
-    setUnavailableWithTargetLink("Abra a página de Posições da carteira do Investidor10 para exportar.");
+    setUnavailableWithTargetLink("Abra uma aba de Posições, Lançamentos ou Proventos da carteira do Investidor10 para exportar.");
     return;
   }
 
+  expandButton.textContent = getPageTypeFromUrl(tab.url) === "positions"
+    ? "Expandir tudo"
+    : "Carregar todas as páginas";
+  earningsFilterNoticeEl.hidden = getPageTypeFromUrl(tab.url) !== "dividends";
+
   await refreshData({ force: true });
+  await loadWalletLinks();
   refreshTimer = window.setInterval(() => refreshData({ silent: true }), 2000);
   setBusy(false);
 }
 
-function isAcceptedPositionsUrl(url) {
+function getPageTypeFromUrl(url) {
   try {
     const parsedUrl = new URL(url);
-    return parsedUrl.hostname.endsWith("investidor10.com.br")
-      && POSITIONS_PATH_PATTERN.test(parsedUrl.pathname);
+    if (parsedUrl.hostname !== WALLET_HOST) {
+      return null;
+    }
+    return Object.entries(PAGE_PATTERNS).find(([, pattern]) => pattern.test(parsedUrl.pathname))?.[0] || null;
   } catch (_error) {
-    return false;
+    return null;
   }
+}
+
+function isAcceptedWalletUrl(url) {
+  return Boolean(getPageTypeFromUrl(url));
 }
 
 function syncToolbarIconWithColorScheme() {
@@ -65,10 +90,10 @@ async function exportData(action) {
     return;
   }
 
-  const label = action === "EXPORT_CSV" ? "CSV" : "PDF";
+  const label = action.endsWith("CSV") ? "CSV" : "PDF";
   setBusy(true, `Gerando ${label}...`);
 
-  const response = await sendAction(action);
+  const response = await sendAction(action, latestExport?.allPages ? { data: latestExport } : {});
   if (!response.ok) {
     setBusy(false);
     setUnavailable(response.error || `Não foi possível gerar o ${label}.`);
@@ -76,6 +101,9 @@ async function exportData(action) {
   }
 
   const warnings = response.warnings || latestExport.warnings || [];
+  if (response.data?.allPages) {
+    stopRefreshTimer();
+  }
   setBusy(false);
   renderSummary(response.data || latestExport, warnings);
   statusEl.textContent = `${label} exportado com sucesso.`;
@@ -86,9 +114,9 @@ async function expandAllSections() {
     return;
   }
 
-  setBusy(true, "Expandindo todos os tipos de ativo...");
+  setBusy(true, expandButton.textContent === "Expandir tudo" ? "Expandindo todos os tipos de ativo..." : "Carregando todas as páginas...");
 
-  const response = await sendAction("EXPAND_ALL_SECTIONS");
+  const response = await sendAction("EXPAND_ALL");
   if (!response.ok) {
     setBusy(false);
     setUnavailable(response.error || "Não foi possível expandir as tabelas.");
@@ -96,17 +124,22 @@ async function expandAllSections() {
   }
 
   latestExport = response.data;
+  if (latestExport?.allPages) {
+    stopRefreshTimer();
+  }
   setBusy(false);
   renderSummary(latestExport, response.warnings || latestExport.warnings || []);
-  statusEl.textContent = "Tabelas expandidas e contadores atualizados.";
+  statusEl.textContent = expandButton.textContent === "Expandir tudo"
+    ? "Tabelas expandidas e contadores atualizados."
+    : "Todas as páginas foram carregadas e os contadores atualizados.";
 }
 
 async function refreshData(options = {}) {
-  if (isBusy && !options.force) {
+  if ((isBusy || latestExport?.allPages) && !options.force) {
     return;
   }
 
-  const response = await sendAction("EXTRACT_POSITIONS");
+  const response = await sendAction("EXTRACT_CURRENT");
   if (!response.ok) {
     if (!options.silent) {
       setUnavailable(response.error || "Não foi possível ler as posições da página.");
@@ -118,8 +151,15 @@ async function refreshData(options = {}) {
   renderSummary(latestExport, response.warnings || latestExport.warnings || []);
 }
 
-async function sendAction(action) {
-  const message = { action };
+function stopRefreshTimer() {
+  if (refreshTimer !== null) {
+    window.clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+async function sendAction(action, extra = {}) {
+  const message = { action, ...extra };
 
   try {
     return await chrome.tabs.sendMessage(activeTabId, message);
@@ -143,8 +183,10 @@ function renderSummary(data, warnings) {
   sectionCountEl.textContent = String(sectionCount);
   rowCountEl.textContent = String(rowCount);
   statusEl.textContent = sectionCount
-    ? `Pronto para exportar ${rowCount} posições.`
-    : "Nenhuma tabela de posições encontrada.";
+    ? `Pronto para exportar ${rowCount} registros de ${String(data.title || "dados").toLowerCase()}.`
+    : `Nenhuma tabela de ${String(data.title || "dados").toLowerCase()} encontrada.`;
+  pageKindEl.textContent = PAGE_LABELS[data.pageType] || data.title || "";
+  earningsFilterNoticeEl.hidden = data.pageType !== "dividends";
 
   warningsEl.replaceChildren();
   warningsEl.hidden = warnings.length === 0;
@@ -172,25 +214,44 @@ function setUnavailable(message) {
   rowCountEl.textContent = "-";
   warningsEl.hidden = true;
   warningsEl.replaceChildren();
+  pageKindEl.textContent = "";
+  walletLinksEl.hidden = true;
+  walletLinksEl.replaceChildren();
   toggleActions(false);
 }
 
+async function loadWalletLinks() {
+  const response = await sendAction("GET_WALLET_LINKS");
+  if (!response.ok || !response.links) {
+    return;
+  }
+
+  renderWalletLinks(response.links);
+}
+
+function renderWalletLinks(links) {
+  walletLinksEl.replaceChildren();
+  for (const link of links) {
+    const anchor = document.createElement("a");
+    anchor.href = link.href;
+    anchor.textContent = `Abrir ${link.label}`;
+    anchor.addEventListener("click", (event) => {
+      event.preventDefault();
+      chrome.tabs.update({ url: link.href });
+      window.close();
+    });
+    walletLinksEl.appendChild(anchor);
+  }
+  walletLinksEl.hidden = links.length === 0;
+}
+
 function setUnavailableWithTargetLink(message) {
-  setUnavailable("");
-  statusEl.replaceChildren(document.createTextNode(`${message} `));
-
-  const link = document.createElement("a");
-  link.href = TARGET_URL;
-  link.textContent = "Abrir página";
-  link.target = "_blank";
-  link.rel = "noreferrer";
-  link.addEventListener("click", (event) => {
-    event.preventDefault();
-    chrome.tabs.update({ url: TARGET_URL });
-    window.close();
-  });
-
-  statusEl.appendChild(link);
+  setUnavailable(message);
+  renderWalletLinks([
+    { label: "Posições", href: TARGET_URL },
+    { label: "Dividendos", href: "https://investidor10.com.br/wallet/my-wallet/pro/earnings" },
+    { label: "Lançamentos", href: "https://investidor10.com.br/wallet/my-wallet/pro/entries" }
+  ]);
 }
 
 function toggleActions(enabled) {

@@ -1,6 +1,22 @@
 (function registerInvestidor10Exporter() {
-  const POSITIONS_PATH_PATTERN = /^\/wallet\/my-wallet(?:\/[^/]+)?\/positions\/?$/;
-  const EXPORT_BASENAME = "investidor10-posicoes";
+  const WALLET_HOST = "investidor10.com.br";
+  const PAGE_DEFINITIONS = {
+    positions: {
+      pattern: /^\/wallet\/my-wallet(?:\/[^/]+)?\/positions\/?$/i,
+      title: "Posições",
+      basename: "investidor10-posicoes"
+    },
+    transactions: {
+      pattern: /^\/wallet\/my-wallet\/[^/]+\/entries\/?$/i,
+      title: "Lançamentos",
+      basename: "investidor10-lancamentos"
+    },
+    dividends: {
+      pattern: /^\/wallet\/my-wallet\/[^/]+\/earnings\/?$/i,
+      title: "Proventos",
+      basename: "investidor10-proventos"
+    }
+  };
 
   if (globalThis.__investidor10ExporterRegistered) {
     return;
@@ -14,17 +30,24 @@
         return false;
       }
 
-      if (message.action === "EXTRACT_POSITIONS") {
-        const data = extractPortfolio();
+      if (message.action === "EXTRACT_CURRENT") {
+        const data = extractCurrentPage();
         sendResponse({ ok: true, data, warnings: data.warnings });
         return false;
       }
 
-      if (message.action === "EXPAND_ALL_SECTIONS") {
-        expandAllSections()
+      if (message.action === "GET_WALLET_LINKS") {
+        sendResponse({ ok: true, links: findWalletLinks() });
+        return false;
+      }
+
+      if (message.action === "EXPAND_ALL") {
+        expandAllData()
           .then(() => {
-            const data = extractPortfolio();
-            sendResponse({ ok: true, data, warnings: data.warnings });
+            const data = getPageType() === "positions"
+              ? extractCurrentPage()
+              : extractCurrentPage({ allPages: true });
+            return Promise.resolve(data).then((result) => sendResponse({ ok: true, data: result, warnings: result.warnings }));
           })
           .catch((error) => {
             sendResponse({ ok: false, error: error.message || "Erro inesperado ao expandir tabelas." });
@@ -32,18 +55,24 @@
         return true;
       }
 
-      if (message.action === "EXPORT_CSV") {
-        const data = extractPortfolio();
-        downloadTextBlob(buildCsv(data), `${EXPORT_BASENAME}-${dateStamp()}.csv`, "text/csv;charset=utf-8");
-        sendResponse({ ok: true, data, warnings: data.warnings });
-        return false;
+      if (message.action === "EXPORT_CURRENT_CSV") {
+        Promise.resolve(message.data || extractCurrentPage({ allPages: true }))
+          .then((data) => {
+            downloadTextBlob(buildCsv(data), `${data.basename}-${dateStamp()}.csv`, "text/csv;charset=utf-8");
+            sendResponse({ ok: true, data, warnings: data.warnings });
+          })
+          .catch((error) => sendResponse({ ok: false, error: error.message || "Erro inesperado ao exportar CSV." }));
+        return true;
       }
 
-      if (message.action === "EXPORT_PDF") {
-        const data = extractPortfolio();
-        downloadBinaryBlob(buildPdf(data), `${EXPORT_BASENAME}-${dateStamp()}.pdf`, "application/pdf");
-        sendResponse({ ok: true, data, warnings: data.warnings });
-        return false;
+      if (message.action === "EXPORT_CURRENT_PDF") {
+        Promise.resolve(message.data || extractCurrentPage({ allPages: true }))
+          .then((data) => {
+            downloadBinaryBlob(buildPdf(data), `${data.basename}-${dateStamp()}.pdf`, "application/pdf");
+            sendResponse({ ok: true, data, warnings: data.warnings });
+          })
+          .catch((error) => sendResponse({ ok: false, error: error.message || "Erro inesperado ao exportar PDF." }));
+        return true;
       }
 
       sendResponse({ ok: false, error: "Acao desconhecida." });
@@ -88,12 +117,232 @@
     }
 
     return {
+      pageType: "positions",
+      title: PAGE_DEFINITIONS.positions.title,
+      basename: PAGE_DEFINITIONS.positions.basename,
       exportedAt: new Date().toISOString(),
       sourceUrl: location.href,
       sections,
       warnings
     };
   }
+
+  function extractCurrentPage(options = {}) {
+    const pageType = getPageType();
+    if (pageType === "positions") {
+      return extractPortfolio();
+    }
+    if (!pageType) {
+      throw new Error("Abra a aba de Lançamentos ou Proventos da carteira do Investidor10.");
+    }
+    return options.allPages ? extractAllTablePages(pageType) : extractTablePage(pageType);
+  }
+
+  function getPageType() {
+    if (location.hostname !== WALLET_HOST) {
+      return null;
+    }
+    return Object.entries(PAGE_DEFINITIONS).find(([, definition]) => definition.pattern.test(location.pathname))?.[0] || null;
+  }
+
+  function extractTablePage(pageType) {
+    const definition = PAGE_DEFINITIONS[pageType];
+    const tables = Array.from(document.querySelectorAll("table[role='table'], table"))
+      .filter((table) => table.querySelector("thead, tbody, tr") && isVisibleElement(table))
+      .filter((table) => !table.parentElement?.closest("table"))
+      .filter((table) => pageType !== "dividends" || isDetailedDividendsTable(table));
+    const sections = tables.map((table, index) => extractTableSection(table, `${definition.title} ${index + 1}`));
+    const validSections = sections
+      .filter((section) => section.headers.length > 0 && section.rows.length > 0)
+      .map((section, index, allSections) => allSections.length === 1
+        ? { ...section, name: definition.title }
+        : section);
+    if (validSections.length === 0) {
+      throw new Error(`Nenhuma tabela de ${definition.title.toLowerCase()} foi encontrada. Aguarde a página carregar e tente novamente.`);
+    }
+    return {
+      pageType,
+      title: definition.title,
+      basename: definition.basename,
+      exportedAt: new Date().toISOString(),
+      sourceUrl: location.href,
+      sections: validSections,
+      warnings: []
+    };
+  }
+
+  async function extractAllTablePages(pageType) {
+    const definition = PAGE_DEFINITIONS[pageType];
+    const current = extractTablePage(pageType);
+    const sectionsByName = new Map(current.sections.map((section) => [section.name, { ...section, rows: [...section.rows] }]));
+    const sectionSignatures = new Map(current.sections.map((section) => [section.name, sectionRowsSignature(section)]));
+    const seenSignatures = new Set([tableSignature(current)]);
+    let pageCount = 1;
+
+    let currentPageNumber = getCurrentPageNumber() || 1;
+    while (pageCount < 100) {
+      const next = findPageButton(currentPageNumber + 1) || findNextPageButton();
+      if (!next || next.disabled || next.getAttribute("aria-disabled") === "true") {
+        break;
+      }
+      next.click();
+      const page = await waitForTablePageChange(pageType, seenSignatures);
+      if (!page) {
+        break;
+      }
+      const signature = tableSignature(page);
+      seenSignatures.add(signature);
+      page.sections.forEach((section) => {
+        const currentSectionSignature = sectionRowsSignature(section);
+        if (sectionSignatures.get(section.name) === currentSectionSignature) {
+          return;
+        }
+        const target = sectionsByName.get(section.name) || { ...section, rows: [] };
+        target.rows.push(...section.rows);
+        target.rowCount = target.rows.length;
+        sectionsByName.set(section.name, target);
+        sectionSignatures.set(section.name, currentSectionSignature);
+      });
+      pageCount += 1;
+      currentPageNumber = getCurrentPageNumber() || currentPageNumber + 1;
+    }
+
+    return {
+      pageType,
+      title: definition.title,
+      basename: definition.basename,
+      exportedAt: new Date().toISOString(),
+      sourceUrl: location.href,
+      sections: Array.from(sectionsByName.values()),
+      allPages: true,
+      pageCount,
+      warnings: pageCount > 1 ? [] : ["A página não exibiu um paginador com uma próxima página disponível; foram exportadas as linhas renderizadas."]
+    };
+  }
+
+  function extractTableSection(table, name) {
+    const headerCells = Array.from(table.querySelectorAll("thead th, thead td, tr th"));
+    const allRows = Array.from(table.querySelectorAll("tbody tr"));
+    const rowsAsCells = allRows.map((row) => Array.from(row.children).map((cell) => normalizeText(cell.innerText || cell.textContent)));
+    const rawHeaders = headerCells.map((cell) => normalizeText(cell.innerText || cell.textContent));
+    const headers = rawHeaders.length > 0 ? rawHeaders : inferHeadersFromFirstRow(rowsAsCells);
+    const exportIndexes = headers
+      .map((header, headerIndex) => ({ header, headerIndex }))
+      .filter(({ header }) => header && !/^(funções|funcoes|opções|opcoes|ações|acoes)$/i.test(header));
+    const rows = rowsAsCells.filter((cells) => cells.some(Boolean)).map((cells) => {
+      const row = {};
+      for (const { header, headerIndex } of exportIndexes) {
+        row[header] = cells[headerIndex] || "";
+      }
+      return row;
+    });
+    return { name, summaryText: "", expectedCount: null, rowCount: rows.length, headers: exportIndexes.map(({ header }) => header), rows };
+  }
+
+  function isDetailedDividendsTable(table) {
+    const headers = Array.from(table.querySelectorAll("thead th, thead td, tr th"))
+      .map((cell) => normalizeText(cell.innerText || cell.textContent).toLowerCase());
+    return headers.some((header) => header.includes("data pagamento"))
+      && headers.some((header) => header.includes("valor total"));
+  }
+
+  function getCurrentPageNumber() {
+    const current = Array.from(document.querySelectorAll("button[aria-current='true'], [aria-current='true']"))
+      .find((element) => /^página\s+\d+$/i.test(normalizeText(element.getAttribute("aria-label") || element.textContent)));
+    const match = current && normalizeText(current.getAttribute("aria-label") || current.textContent).match(/(\d+)/);
+    return match ? Number.parseInt(match[1], 10) : null;
+  }
+
+  function findPageButton(pageNumber) {
+    const label = `Página ${pageNumber}`;
+    return Array.from(document.querySelectorAll("button, a"))
+      .filter((element) => isVisibleElement(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true")
+      .find((element) => normalizeText(element.getAttribute("aria-label") || element.textContent) === label);
+  }
+
+  function findNextPageButton() {
+    return Array.from(document.querySelectorAll("button, a"))
+      .filter((element) => isVisibleElement(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true")
+      .find((element) => {
+        const label = normalizeText(element.getAttribute("aria-label") || element.textContent);
+        return /próxima página|proxima pagina|próximo|proximo|next/i.test(label);
+      });
+  }
+
+  function tableSignature(data) {
+    return data.sections.map((section) => `${section.name}:${section.rows.map((row) => Object.values(row).join("|")).join(";")}`).join("||");
+  }
+
+  function sectionRowsSignature(section) {
+    return section.rows.map((row) => Object.values(row).join("|")).join(";");
+  }
+
+  function findWalletLinks() {
+    const labels = [
+      { label: "Posições", pattern: /posições|posicoes|positions/i, route: "positions" },
+      { label: "Dividendos", pattern: /proventos|earnings|dividendos/i },
+      { label: "Lançamentos", pattern: /lançamentos|lancamentos|entries/i }
+    ];
+    return labels.map(({ label, pattern, route }) => {
+      const anchor = Array.from(document.querySelectorAll("a[href]"))
+        .find((candidate) => pattern.test(normalizeText(candidate.innerText || candidate.getAttribute("aria-label") || candidate.title)) && new URL(candidate.href, location.href).hostname === WALLET_HOST);
+      if (anchor) {
+        return { label, href: anchor.href };
+      }
+      if (route && getPageType()) {
+        const url = new URL(location.href);
+        url.pathname = url.pathname.replace(/\/(?:positions|entries|earnings)\/?$/i, `/${route}`);
+        url.search = "";
+        url.hash = "";
+        return { label, href: url.href };
+      }
+      return null;
+    }).filter(Boolean);
+  }
+
+  async function expandAllData() {
+    const pageType = getPageType();
+    if (pageType === "positions") {
+      await expandAllSections();
+      return;
+    }
+    validateSupportedPage();
+    for (let index = 0; index < 50; index += 1) {
+      const next = findLoadMoreButton();
+      if (!next) {
+        break;
+      }
+      next.click();
+      await waitForTableRender();
+    }
+  }
+
+  function findLoadMoreButton() {
+    return Array.from(document.querySelectorAll("button, a"))
+      .filter((element) => isVisibleElement(element) && !element.disabled)
+      .find((element) => /carregar mais|mostrar mais|ver mais/i.test(normalizeText(element.textContent)));
+  }
+
+  async function waitForTablePageChange(pageType, seenSignatures) {
+    const deadline = Date.now() + 6000;
+    while (Date.now() < deadline) {
+      await waitForTableRender(150);
+      try {
+        const page = extractTablePage(pageType);
+        if (!seenSignatures.has(tableSignature(page))) {
+          return page;
+        }
+      } catch (_error) {
+        // The table can be temporarily empty while the paginator updates it.
+      }
+    }
+    return null;
+  }
+
+  function isVisibleElement(element) {
+    return !element.hidden && element.getClientRects().length > 0;
+  }
+
 
   async function expandAllSections() {
     validatePositionPage();
@@ -111,8 +360,14 @@
   }
 
   function validatePositionPage() {
-    if (!location.hostname.endsWith("investidor10.com.br") || !POSITIONS_PATH_PATTERN.test(location.pathname)) {
+    if (getPageType() !== "positions") {
       throw new Error("Abra a página de Posições da carteira do Investidor10.");
+    }
+  }
+
+  function validateSupportedPage() {
+    if (!getPageType()) {
+      throw new Error("Abra a aba de Posições, Lançamentos ou Proventos da carteira do Investidor10.");
     }
   }
 
@@ -122,9 +377,9 @@
     return className.includes("is-closed") || ariaExpanded === "false";
   }
 
-  function waitForTableRender() {
+  function waitForTableRender(delay = 450) {
     return new Promise((resolve) => {
-      window.setTimeout(resolve, 450);
+      window.setTimeout(resolve, delay);
     });
   }
 
@@ -274,7 +529,10 @@
   }
 
   function csvEscape(value) {
-    const text = String(value ?? "");
+    let text = String(value ?? "");
+    if (/^[=+\-@]/.test(text)) {
+      text = `'${text}`;
+    }
     if (/[;"\r\n]/.test(text)) {
       return `"${text.replace(/"/g, '""')}"`;
     }
@@ -288,7 +546,7 @@
     const contentWidth = state.page.width - margin * 2;
     let y = state.page.height - margin;
 
-    y = doc.text(state.page, "Investidor10 - Posições", margin, y, { size: 15, font: "bold" });
+    y = doc.text(state.page, `Investidor10 - ${data.title || "Exportação"}`, margin, y, { size: 15, font: "bold" });
     y = doc.text(state.page, `Exportado em: ${formatDateTime(data.exportedAt)}`, margin, y - 8, { size: 8 });
     y = doc.text(state.page, `Origem: ${data.sourceUrl}`, margin, y - 4, { size: 8, maxWidth: contentWidth });
     y -= 10;

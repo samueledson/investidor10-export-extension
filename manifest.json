@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Investidor10 Export",
-  "version": "0.1.0",
-  "description": "Exporta as posições da carteira do Investidor10 para CSV e PDF.",
+  "version": "0.1.1",
+  "description": "Exporta posições, lançamentos e proventos da carteira do Investidor10 para CSV e PDF.",
   "permissions": ["activeTab", "scripting"],
   "host_permissions": ["https://investidor10.com.br/*"],
   "icons": {
@@ -21,8 +21,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://investidor10.com.br/wallet/my-wallet/positions*",
-        "https://investidor10.com.br/wallet/my-wallet/*/positions*"
+        "https://investidor10.com.br/wallet/my-wallet/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

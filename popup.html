@@ -3,15 +3,16 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Investidor10 Export</title>
+    <title>Investidor10 Export 0.1.1</title>
     <link rel="stylesheet" href="popup.css">
   </head>
   <body>
     <main class="popup-shell">
       <header class="header">
         <div>
-          <h1>Investidor10 Export</h1>
+          <h1>Investidor10 Export 0.1.1</h1>
           <p id="status">Verificando página...</p>
+          <p id="page-kind" class="page-kind"></p>
         </div>
       </header>
 
@@ -27,6 +28,13 @@
       </section>
 
       <section id="warnings" class="warnings" hidden></section>
+
+      <nav id="wallet-links" class="wallet-links" aria-label="Abas da carteira" hidden></nav>
+
+      <aside id="earnings-filter-notice" class="warnings" role="note" hidden>
+        <p><b>Confira o período selecionado</b></p>
+        <p>A exportação inclui todas as páginas do período e dos filtros selecionados em “Meus proventos”. Selecione o período desejado antes de continuar.</p>
+      </aside>
 
       <section class="actions">
         <button id="expand-button" class="secondary" type="button" disabled>Expandir tudo</button>
